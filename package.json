@@ -1,5 +1,5 @@
 {
-  "name": "aws-azure-login",
+  "name": "@scypi/aws-azure-login",
   "version": "3.6.2",
   "description": "Use Azure AD SSO to log into the AWS CLI.",
   "main": "index.js",

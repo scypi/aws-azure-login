@@ -336,7 +336,15 @@ const states = [
   {
     name: "TFA code input",
     selector: "input[name=otc]:not(.moveOffScreen)",
-    async handler(page: puppeteer.Page): Promise<void> {
+    async handler(
+      page: puppeteer.Page,
+      _selected: puppeteer.ElementHandle,
+      noPrompt: boolean,
+      _defaultUsername: string,
+      _defaultPassword: string | undefined,
+      _rememberMe: boolean,
+      mfa: string | undefined
+    ): Promise<void> {
       const error = await page.$(".alert-error");
       if (error) {
         debug("Found error message. Displaying");
@@ -347,7 +355,7 @@ const states = [
           error
         );
         console.log(errorMessage);
-      } else {
+      } else if (!mfa) {
         const description = await page.$("#idDiv_SAOTCC_Description");
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const descriptionMessage = await page.evaluate(
@@ -358,12 +366,19 @@ const states = [
         console.log(descriptionMessage);
       }
 
-      const { verificationCode } = await inquirer.prompt([
-        {
-          name: "verificationCode",
-          message: "Verification Code:",
-        } as Question,
-      ]);
+      let verificationCode;
+      if (noPrompt && mfa) {
+        debug("Not prompting user for verification code - " + mfa);
+        verificationCode = mfa;
+      } else {
+        debug("Prompting user for verification code");
+        ({ verificationCode } = await inquirer.prompt([
+          {
+            name: "verificationCode",
+            message: "Verification Code:",
+          } as Question,
+        ]));
+      }
 
       debug("Focusing on verification code input");
       await page.focus(`input[name="otc"]`);
@@ -436,6 +451,34 @@ const states = [
       throw new CLIError(descriptionMessage);
     },
   },
+  {
+    name: "recent account",
+    selector: `#tilesHolder`,
+    async handler(page: puppeteer.Page) {
+      debug("Recent accounts present.");
+      // dunno what happen if there will be more than one
+      const selector = ".content"
+      const tile = await page.$(selector);
+      await page.evaluate(
+        // eslint-disable-next-line
+        (t) => t.click(), tile);
+      await Bluebird.delay(500);
+    }
+  },
+  {
+    name: "mfa",
+    selector: `#idDiv_SAOTCS_Title`,
+    async handler(page: puppeteer.Page) {
+      debug("MFA selector.");
+      // dunno what happen if there will be more than one
+      const selector = ".content"
+      const tile = await page.$(selector);
+      await page.evaluate(
+        // eslint-disable-next-line
+        (t) => t.click(), tile);
+      await Bluebird.delay(500);
+    }
+  }
 ];
 
 export const login = {
@@ -492,7 +535,8 @@ export const login = {
       enableChromeSeamlessSso,
       profile.azure_default_remember_me,
       noDisableExtensions,
-      disableGpu
+      disableGpu,
+      profile.azure_mfa
     );
     const roles = this._parseRolesFromSamlResponse(samlResponse);
     const { role, durationHours } = await this._askUserForRoleAndDurationAsync(
@@ -528,27 +572,54 @@ export const login = {
       return;
     }
 
-    for (const profile of profiles) {
-      debug(`Check if profile ${profile} is expired or is about to expire`);
+    const dp = await this._loadProfileAsync("default");
+    const loginUrl = await this._createLoginUrlAsync(
+      dp.azure_app_id_uri,
+      dp.azure_tenant_id,
+      AWS_SAML_ENDPOINT
+    );
+    const samlResponse = await this._performLoginAsync(
+      loginUrl,
+      true,
+      disableSandbox,
+      true,
+      noPrompt,
+      enableChromeNetworkService,
+      dp.azure_default_username,
+      dp.azure_default_password,
+      enableChromeSeamlessSso,
+      dp.azure_default_remember_me,
+      noDisableExtensions,
+      disableGpu,
+      dp.azure_mfa
+    );
+    const roles = this._parseRolesFromSamlResponse(samlResponse);
+    for (const profileName of profiles) {
+      debug(`Check if profile ${profileName} is expired or is about to expire`);
       if (
         !forceRefresh &&
-        !(await awsConfig.isProfileAboutToExpireAsync(profile))
+        !(await awsConfig.isProfileAboutToExpireAsync(profileName))
       ) {
-        debug(`Profile ${profile} not yet due for refresh.`);
+        debug(`Profile ${profileName} not yet due for refresh.`);
         continue;
       }
 
-      debug(`Run login for profile: ${profile}`);
-      await this.loginAsync(
-        profile,
-        mode,
-        disableSandbox,
-        noPrompt,
-        enableChromeNetworkService,
+      debug(`Run login for profile: ${profileName}`);
+      const profile = await this._loadProfileAsync(profileName);
+      const { role, durationHours } =
+        await this._askUserForRoleAndDurationAsync(
+          roles,
+          noPrompt,
+          profile.azure_default_role_arn,
+          profile.azure_default_duration_hours
+        );
+      await this._assumeRoleAsync(
+        profileName,
+        samlResponse,
+        role,
+        durationHours,
         awsNoVerifySsl,
-        enableChromeSeamlessSso,
-        noDisableExtensions,
-        disableGpu
+        profile.region
       );
     }
   },
@@ -563,6 +634,7 @@ export const login = {
       "azure_default_password",
       "azure_default_role_arn",
       "azure_default_duration_hours",
+      "azure_mfa",
     ];
     for (let i = 0; i < options.length; i++) {
       const opt = options[i];
@@ -681,7 +753,8 @@ export const login = {
     enableChromeSeamlessSso: boolean,
     rememberMe: boolean,
     noDisableExtensions: boolean,
-    disableGpu: boolean
+    disableGpu: boolean,
+    mfa: string | undefined
   ): Promise<string> {
     debug("Loading login page in Chrome");
 
@@ -822,7 +895,8 @@ export const login = {
                   noPrompt,
                   defaultUsername,
                   defaultPassword,
-                  rememberMe
+                  rememberMe,
+                  mfa
                 ),
               ]);
 
